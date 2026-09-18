@@ -7,6 +7,10 @@ on:
         description: "Branch to build"
         required: true
         default: "main"
+      build_type:
+        description: "Build type: release or debug"
+        required: true
+        default: "release"
 
 jobs:
   build:
@@ -41,33 +45,45 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      - name: Detect project type and build APK
+      - name: Detect project and build APK
         run: |
           set -e
-          echo "=== Detecting project type ==="
+          BUILD_TYPE="${{ github.event.inputs.build_type }}"
+          if [ -z "$BUILD_TYPE" ]; then
+            BUILD_TYPE="release"
+          fi
 
+          echo "=== Target Build Type: $BUILD_TYPE ==="
+
+          if [ "$BUILD_TYPE" = "release" ]; then
+            GRADLE_TASK="assembleRelease"
+          else
+            GRADLE_TASK="assembleDebug"
+          fi
+
+          echo "=== Detecting project type ==="
           if [ -f "package.json" ] && grep -q '"expo"' package.json; then
             echo ">>> Expo project detected"
             npm install
             npx expo prebuild --platform android --clean
             cd android
             chmod +x gradlew
-            ./gradlew assembleDebug --no-daemon --build-cache
+            ./gradlew $GRADLE_TASK --no-daemon --build-cache
           elif [ -f "gradlew" ]; then
             echo ">>> Native Android project detected (gradlew in root)"
             chmod +x gradlew
-            ./gradlew assembleDebug --no-daemon --build-cache
+            ./gradlew $GRADLE_TASK --no-daemon --build-cache
           elif [ -f "android/gradlew" ]; then
             echo ">>> React Native project detected (gradlew in android/)"
             cd android
             chmod +x gradlew
-            ./gradlew assembleDebug --no-daemon --build-cache
+            ./gradlew $GRADLE_TASK --no-daemon --build-cache
           elif [ -f "package.json" ]; then
-            echo ">>> React Native (bare) project detected — installing deps first"
+            echo ">>> React Native (bare) project detected — installing deps"
             npm install
             cd android
             chmod +x gradlew
-            ./gradlew assembleDebug --no-daemon --build-cache
+            ./gradlew $GRADLE_TASK --no-daemon --build-cache
           else
             echo "ERROR: Could not detect Android project type"
             ls -la
@@ -76,22 +92,72 @@ jobs:
         env:
           GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.parallel=true -Dorg.gradle.configureondemand=true"
 
-      - name: Find APK
+      - name: Sign Release APK if unsigned
+        run: |
+          set -e
+          BUILD_TYPE="${{ github.event.inputs.build_type }}"
+          echo "Checking APK signature requirement (BUILD_TYPE: $BUILD_TYPE)..."
+
+          UNSIGNED_APK=$(find . -name "*release*unsigned*.apk" | head -1)
+
+          if [ -n "$UNSIGNED_APK" ]; then
+            echo ">>> Found unsigned release APK: $UNSIGNED_APK"
+            echo ">>> Generating signing key and signing with apksigner..."
+
+            # Generate keystore
+            keytool -genkey -v -keystore auto_release.keystore -alias autoReleaseKey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=AutoAPK, OU=Engineering, O=AutoAPK, L=City, S=State, C=US" \
+              -storepass android -keypass android
+
+            # Locate Android build tools (zipalign & apksigner)
+            BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | tail -1)
+            echo "Using Android build tools from: $BUILD_TOOLS_DIR"
+
+            # Align
+            ALIGNED_APK="${UNSIGNED_APK%.apk}-aligned.apk"
+            $BUILD_TOOLS_DIR/zipalign -v -p 4 "$UNSIGNED_APK" "$ALIGNED_APK"
+
+            # Sign
+            SIGNED_APK="${UNSIGNED_APK%-unsigned.apk}.apk"
+            $BUILD_TOOLS_DIR/apksigner sign --ks auto_release.keystore \
+              --ks-pass pass:android --key-pass pass:android \
+              --out "$SIGNED_APK" "$ALIGNED_APK"
+
+            echo ">>> Successfully signed release APK: $SIGNED_APK"
+          else
+            echo "No unsigned release APK found or build is debug. Existing APK will be used."
+          fi
+
+      - name: Locate Final APK
         id: find_apk
         run: |
-          APK=$(find . -name "*.apk" -path "*/debug/*" | head -1)
+          BUILD_TYPE="${{ github.event.inputs.build_type }}"
+          if [ "$BUILD_TYPE" = "release" ]; then
+            # Search for signed release APK (exclude unsigned and aligned intermediate files)
+            APK=$(find . -name "*release*.apk" ! -name "*unsigned*" ! -name "*aligned*" | head -1)
+          else
+            APK=$(find . -name "*debug*.apk" | head -1)
+          fi
+
           if [ -z "$APK" ]; then
-            echo "ERROR: No debug APK found"
+            # Fallback to any valid APK
+            APK=$(find . -name "*.apk" ! -name "*unsigned*" ! -name "*aligned*" | head -1)
+          fi
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: No installable APK found!"
             find . -name "*.apk" || true
             exit 1
           fi
-          echo "apk_path=$APK" >> $GITHUB_OUTPUT
-          echo "Found APK: $APK"
 
-      - name: Upload APK
+          echo "apk_path=$APK" >> $GITHUB_OUTPUT
+          echo "Final APK ready for distribution: $APK"
+
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: debug-apk
+          name: app-apk
           path: ${{ steps.find_apk.outputs.apk_path }}
           retention-days: 7
           if-no-files-found: error
