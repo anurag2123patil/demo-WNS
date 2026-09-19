@@ -35,13 +35,24 @@ jobs:
           java-version: "17"
           distribution: "temurin"
 
-      - name: Cache Gradle packages
+      - name: Cache npm dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            node_modules
+          key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json', 'package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      - name: Cache Gradle & Android build cache
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+            android/.gradle
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/package-lock.json', '**/gradle-wrapper.properties') }}
           restore-keys: |
             ${{ runner.os }}-gradle-
 
@@ -61,29 +72,39 @@ jobs:
             GRADLE_TASK="assembleDebug"
           fi
 
+          # Fast build flags: Target physical mobile devices (arm64-v8a, armeabi-v7a)
+          # Skips compiling C++ for x86 emulators, cutting compilation time by 50%+
+          FAST_FLAGS="-PreactNativeArchitectures=arm64-v8a,armeabi-v7a --build-cache"
+
           echo "=== Detecting project type ==="
           if [ -f "package.json" ] && grep -q '"expo"' package.json; then
             echo ">>> Expo project detected"
-            npm install
+            if [ ! -d "node_modules" ]; then
+              npm install --prefer-offline --no-audit
+            else
+              echo ">>> node_modules restored from cache!"
+            fi
             npx expo prebuild --platform android --clean
             cd android
             chmod +x gradlew
-            ./gradlew $GRADLE_TASK --no-daemon --build-cache
+            ./gradlew $GRADLE_TASK $FAST_FLAGS
           elif [ -f "gradlew" ]; then
             echo ">>> Native Android project detected (gradlew in root)"
             chmod +x gradlew
-            ./gradlew $GRADLE_TASK --no-daemon --build-cache
+            ./gradlew $GRADLE_TASK --build-cache
           elif [ -f "android/gradlew" ]; then
             echo ">>> React Native project detected (gradlew in android/)"
             cd android
             chmod +x gradlew
-            ./gradlew $GRADLE_TASK --no-daemon --build-cache
+            ./gradlew $GRADLE_TASK $FAST_FLAGS
           elif [ -f "package.json" ]; then
             echo ">>> React Native (bare) project detected — installing deps"
-            npm install
+            if [ ! -d "node_modules" ]; then
+              npm install --prefer-offline --no-audit
+            fi
             cd android
             chmod +x gradlew
-            ./gradlew $GRADLE_TASK --no-daemon --build-cache
+            ./gradlew $GRADLE_TASK $FAST_FLAGS
           else
             echo "ERROR: Could not detect Android project type"
             ls -la
@@ -91,7 +112,7 @@ jobs:
           fi
         env:
           NODE_ENV: production
-          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.parallel=true -Dorg.gradle.configureondemand=true"
+          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.parallel=true -Dorg.gradle.caching=true -Dorg.gradle.jvmargs=-Xmx4096m"
 
       - name: Sign Release APK if unsigned
         run: |
