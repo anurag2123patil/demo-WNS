@@ -56,6 +56,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
+      - name: Cache generated Expo android folder
+        uses: actions/cache@v4
+        with:
+          path: android
+          key: ${{ runner.os }}-expo-android-${{ hashFiles('app.json', 'app.config.js', 'app.config.ts', '**/package-lock.json') }}
+
       - name: Detect project and build APK
         run: |
           set -e
@@ -84,7 +90,15 @@ jobs:
             else
               echo ">>> node_modules restored from cache!"
             fi
-            npx expo prebuild --platform android --clean
+
+            # Run prebuild ONLY if native android directory is missing
+            if [ -d "android" ] && [ -f "android/gradlew" ]; then
+              echo ">>> [PREBUILD NOT REQUIRED] Native android folder already exists. Skipping prebuild! ⚡"
+            else
+              echo ">>> [PREBUILD REQUIRED] Native android folder is missing or config changed. Running expo prebuild..."
+              npx expo prebuild --platform android --no-install
+            fi
+
             cd android
             chmod +x gradlew
             ./gradlew $GRADLE_TASK $FAST_FLAGS
